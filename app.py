@@ -78,15 +78,22 @@ def extract_text_from_pdf(pdf_path):
                 text += page_text + "\n"
     return text.strip().lower()
 
-def calculate_match_score(resume_skills, job_skills):
-    """Calculate similarity score using Cosine Similarity."""
+def calculate_weighted_match_score(resume_skills, job_skills, skill_weights):
+    """Calculate weighted similarity score using Cosine Similarity."""
     if not resume_skills or not job_skills:
         return 0.0
 
-    vectorizer = CountVectorizer().fit_transform([" ".join(resume_skills), " ".join(job_skills)])
-    vectors = vectorizer.toarray()
+    # Create weighted vectors
+    resume_vector = []
+    job_vector = []
 
-    similarity = cosine_similarity([vectors[0]], [vectors[1]])[0][0]
+    for skill in job_skills:
+        weight = skill_weights.get(skill, 1)  # Default weight is 1 if not specified
+        resume_vector.append(weight if skill in resume_skills else 0)
+        job_vector.append(weight)
+
+    # Calculate cosine similarity
+    similarity = cosine_similarity([resume_vector], [job_vector])[0][0]
     return round(similarity * 100, 2)
 
 def extract_job_details(job_description):
@@ -104,17 +111,20 @@ def extract_job_details(job_description):
         job_details["title"] = title_match.group(0).strip()
 
     # Extract experience (e.g., "3+ years of experience")
-    experience_match = re.search(r"(\d+\+?\s*(years?|yrs?)\s*of\s*experience)", job_description, re.IGNORECASE)
+    experience_pattern = r"(\d+\+?\s*(years?|yrs?)\s*(of\s*experience)?)"
+    experience_match = re.search(experience_pattern, job_description, re.IGNORECASE)
     if experience_match:
         job_details["experience"] = experience_match.group(0).strip()
 
     # Extract location (e.g., "New York, NY" or "Remote")
-    location_match = re.search(r"(remote|hybrid|onsite|[\w\s]+,\s*[A-Z]{2})", job_description, re.IGNORECASE)
+    location_pattern = r"(remote|hybrid|onsite|[\w\s]+,\s*[A-Z]{2})"
+    location_match = re.search(location_pattern, job_description, re.IGNORECASE)
     if location_match:
         job_details["location"] = location_match.group(0).strip()
 
     # Extract salary range (e.g., "$80,000 - $100,000")
-    salary_match = re.search(r"(\$\d{1,3}(,\d{3})*\s*-\s*\$\d{1,3}(,\d{3})*)", job_description)
+    salary_pattern = r"(\$\d{1,3}(,\d{3})*\s*-\s*\$\d{1,3}(,\d{3})*)"
+    salary_match = re.search(salary_pattern, job_description)
     if salary_match:
         job_details["salary"] = salary_match.group(0).strip()
 
@@ -182,6 +192,50 @@ def extract_candidate_experience(text):
         return max(int(match[0]) for match in matches)
     return 0
 
+def extract_education_requirements(text):
+    """Extract education requirements from job description."""
+    education_keywords = ["bachelor", "master", "phd", "degree", "diploma", "university", "college"]
+    education_requirements = []
+    for sent in text.split("\n"):
+        if any(keyword in sent.lower() for keyword in education_keywords):
+            education_requirements.append(sent.strip())
+    return education_requirements if education_requirements else ["N/A"]
+
+def compare_education(candidate_education, job_education):
+    """Compare candidate's education with job's education requirements."""
+    if not candidate_education or not job_education:
+        return "N/A"
+
+    # Check if any of the candidate's education matches the job's education requirements
+    for edu in candidate_education:
+        if any(req.lower() in edu.lower() for req in job_education):
+            return "Yes"
+    return "No"
+
+def calculate_statistics(screened_resumes):
+    """Calculate statistics for the dashboard."""
+    total_resumes = len(screened_resumes)
+    suitable_resumes = sum(1 for res in screened_resumes if res["suitable"] == "Yes")
+    unsuitable_resumes = total_resumes - suitable_resumes
+    suitable_percentage = round((suitable_resumes / total_resumes) * 100, 2) if total_resumes > 0 else 0
+    unsuitable_percentage = round((unsuitable_resumes / total_resumes) * 100, 2) if total_resumes > 0 else 0
+    average_match_score = round(sum(res["match_score"] for res in screened_resumes) / total_resumes, 2) if total_resumes > 0 else 0
+
+    # Calculate top skills lacking
+    skills_lacking = {}
+    for res in screened_resumes:
+        for skill in res["skills_lacking"]:
+            skills_lacking[skill] = skills_lacking.get(skill, 0) + 1
+    top_skills_lacking = sorted(skills_lacking.items(), key=lambda x: x[1], reverse=True)[:5]
+
+    return {
+        "total_resumes": total_resumes,
+        "suitable_percentage": suitable_percentage,
+        "unsuitable_percentage": unsuitable_percentage,
+        "average_match_score": average_match_score,
+        "top_skills_lacking": top_skills_lacking
+    }
+
 @app.route("/", methods=["GET", "POST"])
 def home():
     global screened_resumes
@@ -198,6 +252,10 @@ def home():
                 session["job_location"] = job_details["location"]
                 session["job_salary"] = job_details["salary"]
                 session["job_experience_years"] = extract_years_of_experience(job_details["experience"])
+                session["job_education"] = extract_education_requirements(job_description)
+
+                # Initialize skill weights (default weight is 1)
+                session["skill_weights"] = {skill: 1 for skill in session["job_skills"]}
 
         elif "resume_pdf" in request.files:
             files = request.files.getlist("resume_pdf")
@@ -211,24 +269,31 @@ def home():
                 resume_text = extract_text_from_pdf(file_path)
                 resume_skills = extract_skills(resume_text)
 
-                # Extract additional resume details
-                candidate_name = extract_candidate_name(resume_text)
-                contact_info = extract_contact_info(resume_text)
-                education = extract_education(resume_text)
-                experience = extract_experience(resume_text)
-                projects = extract_projects(resume_text)
-                candidate_experience_years = extract_candidate_experience(resume_text)
-
                 job_skills = session.get("job_skills", [])
-                match_score = calculate_match_score(resume_skills, job_skills)
+                skill_weights = session.get("skill_weights", {})
+                match_score = calculate_weighted_match_score(resume_skills, job_skills, skill_weights)
                 suitability = "Yes" if match_score >= 50 else "No"
 
                 # Calculate skills lacking
                 skills_lacking = list(set(job_skills) - set(resume_skills))
+                candidate_experience_years = extract_candidate_experience(resume_text)
 
                 # Check if candidate meets experience requirement
                 job_experience_years = session.get("job_experience_years", 0)
                 experience_met = "Yes" if candidate_experience_years >= job_experience_years else "No"
+                
+                candidate_name = extract_candidate_name(resume_text)
+                contact_info = extract_contact_info(resume_text)
+                projects = extract_projects(resume_text)
+                candidate_experience = extract_experience(resume_text)
+                candidate_experience = candidate_experience if candidate_experience else ["N/A"]  # Handle empty experience field if present
+                
+                # Check if candidate meets education requirement
+                education = extract_education(resume_text)
+                education = education if education else ["N/A"]  # Handle empty education field if present
+                
+                job_education = session.get("job_education", ["N/A"])
+                education_met = compare_education(education, job_education)
 
                 screened_resumes.append({
                     "slno": len(screened_resumes) + 1,
@@ -236,7 +301,8 @@ def home():
                     "email": contact_info["email"],
                     "phone": contact_info["phone"],
                     "education": education,
-                    "experience": experience,
+                    "education_met": education_met,
+                    "experience": candidate_experience,
                     "candidate_experience_years": candidate_experience_years,
                     "projects": projects,
                     "skills": resume_skills,
@@ -248,6 +314,9 @@ def home():
 
                 os.remove(file_path)
 
+    # Calculate statistics for the dashboard
+    statistics = calculate_statistics(screened_resumes)
+
     return render_template(
         "index.html",
         job_description=session.get("job_description", ""),
@@ -256,8 +325,20 @@ def home():
         job_experience=session.get("job_experience", "N/A"),
         job_location=session.get("job_location", "N/A"),
         job_salary=session.get("job_salary", "N/A"),
-        screened_resumes=screened_resumes
+        skill_weights=session.get("skill_weights", {}),
+        screened_resumes=screened_resumes,
+        statistics=statistics
     )
+
+@app.route("/update-weights", methods=["POST"])
+def update_weights():
+    if request.method == "POST":
+        skill_weights = {}
+        for skill in session.get("job_skills", []):
+            weight = request.form.get(f"weight_{skill}", "1")
+            skill_weights[skill] = int(weight)
+        session["skill_weights"] = skill_weights
+    return "Weights updated successfully."
 
 @app.route("/download-report")
 def download_report():

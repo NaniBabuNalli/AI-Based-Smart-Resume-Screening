@@ -47,7 +47,7 @@
 
             rows.forEach((row, index) => {
                 if (index === 0) return; // Skip header row
-                const suitability = row.cells[10].textContent.toLowerCase();
+                const suitability = row.cells[11].textContent.toLowerCase();
                 if (filterValue === "all" || suitability === filterValue) {
                     row.style.display = "";
                 } else {
@@ -91,7 +91,23 @@
             </ul>
 
             <h3>Extracted Skills:</h3>
-            <p>{{ job_skills | join(', ') }}</p>
+            <form method="POST" action="/update-weights">
+                <table>
+                    <tr>
+                        <th>Skill</th>
+                        <th>Weight</th>
+                    </tr>
+                    {% for skill in job_skills %}
+                    <tr>
+                        <td>{{ skill }}</td>
+                        <td>
+                            <input type="number" name="weight_{{ skill }}" value="{{ skill_weights.get(skill, 1) }}" min="1" step="1">
+                        </td>
+                    </tr>
+                    {% endfor %}
+                </table>
+                <button type="submit">Update Weights</button>
+            </form>
 
             <button onclick="showResumeUpload()">Screen Resume</button>
         {% endif %}
@@ -107,6 +123,20 @@
         <div id="loading" class="loader"></div>
 
         {% if screened_resumes %}
+            <h2>Dashboard Analytics</h2>
+            <div>
+                <p><strong>Total Resumes Screened:</strong> {{ statistics.total_resumes }}</p>
+                <p><strong>Suitable Candidates:</strong> {{ statistics.suitable_percentage }}%</p>
+                <p><strong>Unsuitable Candidates:</strong> {{ statistics.unsuitable_percentage }}%</p>
+                <p><strong>Average Match Score:</strong> {{ statistics.average_match_score }}%</p>
+                <p><strong>Top Skills Lacking:</strong></p>
+                <ul>
+                    {% for skill, count in statistics.top_skills_lacking %}
+                        <li>{{ skill }} ({{ count }} candidates)</li>
+                    {% endfor %}
+                </ul>
+            </div>
+
             <h2>Previously Screened Resumes</h2>
             <label for="filter">Filter by Suitability:</label>
             <select id="filter" onchange="filterTable()">
@@ -123,6 +153,7 @@
                     <th>Email</th>
                     <th>Phone</th>
                     <th>Education</th>
+                    <th>Education Met</th>
                     <th>Experience</th>
                     <th>Experience Met</th>
                     <th>Projects</th>
@@ -144,6 +175,7 @@
                             {% endfor %}
                         </ul>
                     </td>
+                    <td>{{ res.education_met }}</td>
                     <td>
                         <ul>
                             {% for exp in res.experience %}
