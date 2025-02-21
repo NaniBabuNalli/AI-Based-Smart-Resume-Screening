@@ -7,6 +7,11 @@ from sklearn.feature_extraction.text import CountVectorizer
 from sklearn.metrics.pairwise import cosine_similarity
 import io
 import re
+import smtplib
+from email.mime.text import MIMEText
+from email.mime.multipart import MIMEMultipart
+from transformers import BertTokenizer, BertForSequenceClassification
+from scipy.special import softmax
 
 app = Flask(__name__)
 app.secret_key = "your_secret_key"
@@ -14,6 +19,55 @@ app.config["UPLOAD_FOLDER"] = "uploads"
 
 # Load NLP model
 nlp = spacy.load("en_core_web_sm")
+
+# Sentiment Analysis Setup
+MODEL_NAME = "nlptown/bert-base-multilingual-uncased-sentiment"
+tokenizer = BertTokenizer.from_pretrained(MODEL_NAME)
+model = BertForSequenceClassification.from_pretrained(MODEL_NAME)
+
+def get_sentiment_score(text):
+    """
+    Analyze sentiment using BERT model and return sentiment score.
+    """
+    if not text.strip():
+        return "Neutral", 0.5  # Default for empty text
+    
+    inputs = tokenizer(text, return_tensors="pt", truncation=True, padding=True, max_length=512)
+    outputs = model(**inputs)
+    scores = outputs.logits.detach().numpy()[0]
+    probabilities = softmax(scores)
+
+    sentiment_labels = ["Very Negative", "Negative", "Neutral", "Positive", "Very Positive"]
+    sentiment_index = probabilities.argmax()
+    return sentiment_labels[sentiment_index], probabilities[sentiment_index]
+
+def analyze_resume_sentiment(df):
+    """
+    Reads a resume dataset, extracts key sections, and performs sentiment analysis.
+    """
+    sentiment_results = []
+
+    for _, row in df.iterrows():
+        candidate_name = row.get("name", "Unknown Candidate")
+        career_objective = row.get("career_objective", "")
+        skills = row.get("skills", "")
+        work_experience = row.get("experience", "")
+        extra_curricular = row.get("extra_curricular", "")
+
+        # Combine all text sections
+        resume_text = f"{career_objective} {skills} {work_experience} {extra_curricular}"
+
+        # Perform Sentiment Analysis
+        sentiment_label, sentiment_score = get_sentiment_score(resume_text)
+
+        # Store result
+        sentiment_results.append({
+            "Name": candidate_name,
+            "Sentiment": sentiment_label,
+            "Sentiment Score": sentiment_score * 100  # Convert to percentage
+        })
+
+    return pd.DataFrame(sentiment_results)
 
 # Predefined skill set
 skill_keywords = {
@@ -62,6 +116,59 @@ os.makedirs(app.config["UPLOAD_FOLDER"], exist_ok=True)
 
 # Store screened resumes globally
 screened_resumes = []
+
+# Email configuration
+SMTP_SERVER = "smtp.gmail.com"
+SMTP_PORT = 587
+EMAIL_ADDRESS = "naninalli02@gmail.com"  # Your email address
+EMAIL_PASSWORD = "yjmlyaycgytaewdh"    # Your email password or app password
+
+# New Email Function
+def send_rejection_email(candidate_email, candidate_name, skills_lacking, match_score):
+    """
+    Send a rejection email to the candidate with personalized feedback.
+    """
+    subject = "Application Status Update"
+    body = f"""
+    Dear {candidate_name},
+
+    Thank you for applying for the position. After careful consideration, we regret to inform you that your application has not been successful.
+
+    Here are some details regarding your application:
+    - Match Score: {match_score}%
+    - Skills Lacking: {', '.join(skills_lacking) if skills_lacking else 'N/A'}
+
+    Suggestions for Improvement:
+    - Consider gaining experience in the following areas: {', '.join(skills_lacking) if skills_lacking else 'N/A'}
+    - Enhance your skills in the mentioned areas through online courses or certifications.
+
+    We encourage you to apply for future openings that match your skills and experience.
+
+    Best regards,
+    Hiring Team
+    """
+
+    msg = MIMEMultipart()
+    msg['From'] = EMAIL_ADDRESS
+    msg['To'] = candidate_email
+    msg['Subject'] = subject
+    msg.attach(MIMEText(body, 'plain'))
+
+    try:
+        # Connect to the SMTP server
+        server = smtplib.SMTP(SMTP_SERVER, SMTP_PORT)
+        server.starttls()  # Upgrade the connection to secure
+        server.login(EMAIL_ADDRESS, EMAIL_PASSWORD)  # Log in to the email account
+
+        # Send the email
+        server.sendmail(EMAIL_ADDRESS, candidate_email, msg.as_string())
+        server.quit()  # Close the connection
+        print(f"Rejection email sent to {candidate_email}")
+        return True
+    except Exception as e:
+        # Log the error for debugging
+        print(f"Failed to send email to {candidate_email}: {e}")
+        return False
 
 def extract_skills(text):
     """Extract skills from text using predefined skill matching."""
@@ -123,7 +230,7 @@ def extract_job_details(job_description):
         job_details["location"] = location_match.group(0).strip()
 
     # Extract salary range (e.g., "$80,000 - $100,000")
-    salary_pattern = r"(\$\d{1,3}(,\d{3})*\s*-\s*\$\d{1,3}(,\d{3})*)"
+    salary_pattern = r"(\$\d{1,3}(,\d{3})\s-\s*\$\d{1,3}(,\d{3})*)"
     salary_match = re.search(salary_pattern, job_description)
     if salary_match:
         job_details["salary"] = salary_match.group(0).strip()
@@ -295,6 +402,9 @@ def home():
                 job_education = session.get("job_education", ["N/A"])
                 education_met = compare_education(education, job_education)
 
+                # Perform Sentiment Analysis
+                sentiment_label, sentiment_score = get_sentiment_score(resume_text)
+
                 screened_resumes.append({
                     "slno": len(screened_resumes) + 1,
                     "name": candidate_name,
@@ -309,8 +419,14 @@ def home():
                     "suitable": suitability,
                     "match_score": match_score,
                     "skills_lacking": skills_lacking,
-                    "experience_met": experience_met
+                    "experience_met": experience_met,
+                    "sentiment": sentiment_label,
+                    "sentiment_score": sentiment_score
                 })
+
+                # Send rejection email if candidate is unsuitable
+                if suitability == "No":
+                    send_rejection_email(contact_info["email"], candidate_name, skills_lacking, match_score)
 
                 os.remove(file_path)
 
@@ -359,6 +475,30 @@ def clear_resumes():
     global screened_resumes
     screened_resumes = []
     return "Cleared all resumes."
+
+@app.route("/analyze-sentiment", methods=["GET"])
+def analyze_sentiment():
+    global screened_resumes
+    if not screened_resumes:
+        return "No resumes to analyze."
+
+    # Convert screened_resumes to a DataFrame
+    df = pd.DataFrame(screened_resumes)
+    
+    # Perform sentiment analysis
+    sentiment_results = analyze_resume_sentiment(df)
+    
+    # Save results to a CSV file
+    csv_buffer = io.StringIO()
+    sentiment_results.to_csv(csv_buffer, index=False)
+    csv_buffer.seek(0)
+    
+    return send_file(
+        io.BytesIO(csv_buffer.getvalue().encode()),
+        mimetype="text/csv",
+        as_attachment=True,
+        download_name="resume_sentiment_analysis.csv"
+    )
 
 if __name__ == "__main__":
     app.run(host="0.0.0.0", port=5000, debug=True)
