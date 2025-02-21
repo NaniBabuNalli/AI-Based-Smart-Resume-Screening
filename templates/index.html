@@ -27,6 +27,13 @@
         }
         strong { color: green; }
         ul { list-style-type: disc; margin: 0; padding-left: 20px; }
+        @media (max-width: 600px) {
+            table {
+                display: block;
+                overflow-x: auto;
+                white-space: nowrap;
+            }
+        }
     </style>
     <script>
         function showResumeUpload() {
@@ -45,14 +52,22 @@
             const filterValue = document.getElementById("filter").value.toLowerCase();
             const rows = document.querySelectorAll("table tr");
 
+            // Find the index of the "Suitable" column
+            const headerRow = rows[0];
+            const headers = headerRow.querySelectorAll("th");
+            let suitabilityIndex = -1;
+            headers.forEach((header, index) => {
+                if (header.textContent.trim().toLowerCase() === "suitable") {
+                    suitabilityIndex = index;
+                }
+            });
+
+            if (suitabilityIndex === -1) return; // Column not found
+
             rows.forEach((row, index) => {
                 if (index === 0) return; // Skip header row
-                const suitability = row.cells[11].textContent.toLowerCase();
-                if (filterValue === "all" || suitability === filterValue) {
-                    row.style.display = "";
-                } else {
-                    row.style.display = "none";
-                }
+                const suitability = row.cells[suitabilityIndex].textContent.toLowerCase();
+                row.style.display = (filterValue === "all" || suitability === filterValue) ? "" : "none";
             });
         }
 
@@ -61,12 +76,32 @@
         }
 
         function clearResumes() {
-            fetch("/clear-resumes")
-                .then(() => window.location.reload());
+            if (confirm("Are you sure you want to clear all resumes? This action cannot be undone.")) {
+                fetch("/clear-resumes").then(() => window.location.reload());
+            }
         }
 
-        document.querySelector("form[enctype='multipart/form-data']").addEventListener("submit", function() {
+        function analyzeSentiment() {
+            window.location.href = "/analyze-sentiment";
+        }
+
+        document.querySelector("form").addEventListener("submit", function () {
             showLoading();
+        });
+
+        window.addEventListener("load", function () {
+            hideLoading();
+        });
+
+        document.querySelector("input[type='file']").addEventListener("change", function (e) {
+            const files = e.target.files;
+            for (const file of files) {
+                if (!file.name.endsWith(".pdf")) {
+                    alert("Only PDF files are allowed.");
+                    e.target.value = ""; // Clear the file input
+                    return;
+                }
+            }
         });
     </script>
 </head>
@@ -75,21 +110,19 @@
         <h2>Job Description Input</h2>
         <form method="POST">
             <label for="job_description">Enter Job Description:</label><br>
-            <textarea name="job_description" required></textarea><br><br>
+            <textarea name="job_description" placeholder="Paste the job description here..." required></textarea><br><br>
             <button type="submit">Submit</button>
         </form>
 
         {% if job_description %}
             <h3>Job Title:</h3>
             <p>{{ job_title }}</p>
-
             <h3>Job Details:</h3>
             <ul>
                 <li><strong>Experience Required:</strong> {{ job_experience }}</li>
                 <li><strong>Location:</strong> {{ job_location }}</li>
                 <li><strong>Salary Range:</strong> {{ job_salary }}</li>
             </ul>
-
             <h3>Extracted Skills:</h3>
             <form method="POST" action="/update-weights">
                 <table>
@@ -108,7 +141,6 @@
                 </table>
                 <button type="submit">Update Weights</button>
             </form>
-
             <button onclick="showResumeUpload()">Screen Resume</button>
         {% endif %}
 
@@ -146,14 +178,14 @@
             </select>
             <button onclick="downloadReport()">Download Report</button>
             <button onclick="clearResumes()">Clear All Resumes</button>
+            <button onclick="analyzeSentiment()">Analyze Sentiment</button>
+            <button onclick="document.getElementById('filter').value = 'all'; filterTable();">Reset Filters</button>
             <table>
                 <tr>
                     <th>Sl No</th>
                     <th>Name</th>
                     <th>Email</th>
                     <th>Phone</th>
-                    <th>Education</th>
-                    <th>Education Met</th>
                     <th>Experience</th>
                     <th>Experience Met</th>
                     <th>Projects</th>
@@ -161,6 +193,8 @@
                     <th>Match Score</th>
                     <th>Suitable</th>
                     <th>Skills Lacking</th>
+                    <th>Sentiment</th>
+                    <th>Sentiment Score</th>
                 </tr>
                 {% for res in screened_resumes %}
                 <tr>
@@ -168,53 +202,24 @@
                     <td>{{ res.name }}</td>
                     <td>{{ res.email }}</td>
                     <td>{{ res.phone }}</td>
-                    <td>
-                        <ul>
-                            {% for edu in res.education %}
-                                <li>{{ edu }}</li>
-                            {% endfor %}
-                        </ul>
-                    </td>
-                    <td>{{ res.education_met }}</td>
-                    <td>
-                        <ul>
-                            {% for exp in res.experience %}
-                                <li>{{ exp }}</li>
-                            {% endfor %}
-                        </ul>
-                    </td>
+                    <td>{{ res.candidate_experience_years }} <p>Years</p></td>
                     <td>{{ res.experience_met }}</td>
-                    <td>
-                        <ul>
-                            {% for project in res.projects %}
-                                <li>{{ project }}</li>
-                            {% endfor %}
-                        </ul>
-                    </td>
-                    <td>
-                        <ul>
-                            {% for skill in res.skills %}
-                                {% if skill in job_skills %}
-                                    <li><strong>{{ skill }}</strong></li>
-                                {% else %}
-                                    <li>{{ skill }}</li>
-                                {% endif %}
-                            {% endfor %}
-                        </ul>
-                    </td>
+                    <td><ul>{% for project in res.projects %}<li>{{ project }}</li>{% endfor %}</ul></td>
+                    <td><ul>{% for skill in res.skills %}<li>{{ skill }}</li>{% endfor %}</ul></td>
                     <td>{{ res.match_score }}%</td>
                     <td>{{ res.suitable }}</td>
-                    <td>
-                        <ul>
-                            {% for skill in res.skills_lacking %}
-                                <li>{{ skill }}</li>
-                            {% endfor %}
-                        </ul>
-                    </td>
+                    <td><ul>{% for skill in res.skills_lacking %}<li>{{ skill }}</li>{% endfor %}</ul></td>
+                    <td>{{ res.sentiment }}</td>
+                    <td>{{ res.sentiment_score }}%</td>
                 </tr>
                 {% endfor %}
             </table>
+        {% else %}
+            <p>No resumes have been screened yet. Upload resumes to get started.</p>
         {% endif %}
     </div>
+    <button onclick="window.scrollTo({ top: 0, behavior: 'smooth' })" style="position: fixed; bottom: 20px; right: 20px; padding: 10px; background: #3498db; color: white; border: none; border-radius: 5px; cursor: pointer;">
+        Back to Top
+    </button>
 </body>
 </html>
